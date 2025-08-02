@@ -13,6 +13,7 @@ set(THIS_PACKAGE_DEPENDENCIES
   rclcpp
   rclcpp_components
   std_msgs
+  std_srvs
 )
 
 foreach(DEPENDENCY ${THIS_PACKAGE_DEPENDENCIES})
