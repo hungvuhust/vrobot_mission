@@ -28,7 +28,7 @@ class ServiceCli(Node):
         response = MoveToPose.Response()
 
         request.map_name = map
-        request.pose_id = id
+        request.target_node_id = id
 
         future = self.ser_move_to_pose.call_async(request)
 

@@ -11,7 +11,7 @@ const std::string kTopicActionState   = "/vrobot/mission/state";
 const std::string kServiceCancelMoveToPose = "/vrobot/move/cancel";
 
 constexpr char kPythonScriptPath[] =
-    "/home/hung/ros2_ws/src/vrobot_mission/scripts/temp.py";
+    "/home/rtc/ros2_ws/src/vrobot_mission/scripts/tmp.py";
 // Python code
 constexpr char kPythonCodeHeader[] =
     "from service_cli import *\n"

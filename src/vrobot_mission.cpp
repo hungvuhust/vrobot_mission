@@ -1,4 +1,5 @@
 #include "vrobot_mission/constance.hpp"
+#include <chrono>
 #include <string>
 #include <vrobot_mission/vrobot_mission.hpp>
 
@@ -49,7 +50,8 @@ bool VrobotMission::init_services() {
   }
 
   RCLCPP_INFO(this->get_logger(), "Services initialized");
-  run_mission_thread_ = std::make_shared<NodeThread>(mission_node_);
+  run_mission_thread_  = std::make_shared<NodeThread>(mission_node_);
+  stop_mission_thread_ = std::make_shared<NodeThread>(cancel_mission_node_);
   return true;
 }
 
@@ -88,10 +90,17 @@ void VrobotMission::run_mission_callback(
     if (is_accept) {
 
       is_processing_.store(true);
-      if (stop_mission()) {
-        mission_thread_ = std::make_shared<std::thread>(std::bind(
-            &VrobotMission::thread_mission_child, this, request->pycode));
+
+      if (mission_thread_) {
+        if (mission_thread_->joinable()) {
+          mission_thread_->join();
+          RCLCPP_INFO(this->get_logger(), "Mission thread joined");
+        }
       }
+
+      mission_thread_ = std::make_shared<std::thread>(std::bind(
+          &VrobotMission::thread_mission_child, this, request->pycode));
+
       response->success = true;
     } else {
       response->success = false;
@@ -108,7 +117,7 @@ void VrobotMission::stop_mission_callback(
     std::shared_ptr<Trigger::Response>      response) {
   (void)request;
   try {
-    RCLCPP_INFO(this->get_logger(), "Stopping mission");
+    RCLCPP_INFO(this->get_logger(), "Requesting to stop mission");
     if (is_processing_.load()) {
       stop_mission();
     }
@@ -129,17 +138,81 @@ bool VrobotMission::stop_mission() {
   RCLCPP_INFO(this->get_logger(), "Stopping mission");
 
   if (process_child_.running()) {
-    cancel_move_to_pose();
+    // Đặt flag để báo hiệu dừng process
     is_processing_.store(false);
-    process_child_.terminate();
-    process_child_.wait();
-    RCLCPP_INFO(this->get_logger(), "Process child terminated");
-  }
 
-  if (mission_thread_) {
-    if (mission_thread_->joinable()) {
-      mission_thread_->join();
-      RCLCPP_INFO(this->get_logger(), "Mission thread joined");
+    // Cancel move to pose trước khi terminate process
+    cancel_move_to_pose();
+
+    // Join mission thread TRƯỚC khi terminate process để tránh broken pipe
+    if (mission_thread_) {
+      if (mission_thread_->joinable()) {
+        // Đợi thread kết thúc với timeout
+        auto start           = std::chrono::steady_clock::now();
+        bool thread_finished = false;
+
+        while (!thread_finished && std::chrono::steady_clock::now() - start <
+                                       std::chrono::seconds(3)) {
+          if (mission_thread_->joinable()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+          } else {
+            thread_finished = true;
+          }
+        }
+
+        if (mission_thread_->joinable()) {
+          try {
+            mission_thread_->join();
+            RCLCPP_INFO(this->get_logger(), "Mission thread joined");
+          } catch (const std::exception &e) {
+            RCLCPP_WARN(this->get_logger(),
+                        "Exception while joining mission thread: %s", e.what());
+          }
+        }
+      }
+    }
+
+    // Bây giờ mới terminate process sau khi thread đã dừng
+    if (process_child_.running()) {
+      try {
+        // Đợi một chút để process tự dừng
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+        if (process_child_.running()) {
+          // Thử gửi SIGTERM trước (graceful shutdown)
+          try {
+            process_child_.terminate();
+          } catch (const std::exception &e) {
+            RCLCPP_WARN(this->get_logger(),
+                        "Exception while sending SIGTERM: %s", e.what());
+          }
+
+          // Đợi process terminate với timeout
+          auto start = std::chrono::steady_clock::now();
+          while (process_child_.running() &&
+                 std::chrono::steady_clock::now() - start <
+                     std::chrono::seconds(2)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+          }
+
+          // Xử lý kết quả
+          if (process_child_.running()) {
+            process_child_.detach();
+            RCLCPP_WARN(this->get_logger(), "Process forcefully detached");
+          } else {
+            try {
+              process_child_.wait();
+              RCLCPP_INFO(this->get_logger(), "Process child terminated");
+            } catch (const std::exception &e) {
+              RCLCPP_WARN(this->get_logger(),
+                          "Exception while waiting for process: %s", e.what());
+            }
+          }
+        }
+      } catch (const std::exception &e) {
+        RCLCPP_WARN(this->get_logger(),
+                    "Exception during process termination: %s", e.what());
+      }
     }
   }
 
@@ -172,23 +245,67 @@ void VrobotMission::thread_mission_child(const std::string &pycode) {
 
   while (std::getline(pipe_out, line)) {
     if (is_processing_.load() == false) {
-      pipe_in << "q\n" << std::flush;
+      try {
+        if (pipe_in.good()) {
+          pipe_in << "q\n" << std::flush;
+        }
+      } catch (const std::exception &e) {
+        RCLCPP_WARN(get_logger(), "Exception while sending quit command: %s",
+                    e.what());
+      }
       is_cancelled = true;
       break;
     }
     RCLCPP_INFO(get_logger(), "Received from pdb: %s", line.c_str());
-    if (line.find("-> pdb.set_trace = lambda: None") != std::string::npos) {
-      pipe_in << "c\n" << std::flush;
-    } else if (line.find("->") != std::string::npos) {
-      pipe_in << "n\n" << std::flush;
-      update_action_state(ActionState::RUNNING);
-    } else if (line.find("_ERROR_") != std::string::npos) {
-      is_exception = true;
-      pipe_in << "n\n" << std::flush;
+    try {
+      if (line.find("-> pdb.set_trace = lambda: None") != std::string::npos) {
+        if (pipe_in.good()) {
+          pipe_in << "c\n" << std::flush;
+        }
+      } else if (line.find("->") != std::string::npos) {
+        if (pipe_in.good()) {
+          pipe_in << "n\n" << std::flush;
+        }
+        update_action_state(ActionState::RUNNING);
+      } else if (line.find("_ERROR_") != std::string::npos) {
+        is_exception = true;
+        if (pipe_in.good()) {
+          pipe_in << "n\n" << std::flush;
+        }
+      }
+    } catch (const std::exception &e) {
+      RCLCPP_WARN(get_logger(),
+                  "Exception while communicating with process: %s", e.what());
+      break;
     }
   }
 
-  process_child_.wait();
+  // Đóng pipe một cách rõ ràng để tránh broken pipe
+  try {
+    // Flush và đóng input pipe trước
+    if (pipe_in.good()) {
+      pipe_in.flush();
+      pipe_in.close();
+    }
+    // Đóng output pipe
+    if (pipe_out.good()) {
+      pipe_out.close();
+    }
+    RCLCPP_DEBUG(get_logger(), "Pipes closed successfully");
+  } catch (const std::exception &e) {
+    RCLCPP_WARN(get_logger(), "Exception while closing pipes: %s", e.what());
+  }
+
+  // Đợi process kết thúc một cách an toàn
+  try {
+    if (process_child_.running()) {
+      process_child_.wait();
+    }
+  } catch (const std::exception &e) {
+    RCLCPP_WARN(get_logger(), "Exception while waiting for process: %s",
+                e.what());
+  }
+
   if (is_cancelled) {
     update_action_state(ActionState::CANCELLED);
   } else if (is_exception) {
@@ -213,7 +330,7 @@ bool VrobotMission::cancel_move_to_pose() {
 
   if (cancel_move_to_pose_client_) {
     auto request  = std::make_shared<Empty::Request>();
-    auto response = cancel_move_to_pose_client_->invoke(request);
+    auto response = cancel_move_to_pose_client_->invoke(request, 5000ms);
     if (response) {
       RCLCPP_INFO(this->get_logger(), "Move to pose cancelled");
     } else {

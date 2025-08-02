@@ -66,6 +66,7 @@ private:
   rclcpp::Service<RunMission>::SharedPtr run_mission_service_;
   NodeThread::Ptr                        run_mission_thread_;
   rclcpp::Service<Trigger>::SharedPtr    stop_mission_service_;
+  NodeThread::Ptr                        stop_mission_thread_;
 
   // Cancel mission
   std::shared_ptr<ServiceClient<Empty>> cancel_move_to_pose_client_{nullptr};
