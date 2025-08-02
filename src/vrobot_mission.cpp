@@ -25,6 +25,7 @@ VrobotMission::VrobotMission(const rclcpp::NodeOptions &options)
 
 VrobotMission::~VrobotMission() {
   RCLCPP_INFO(this->get_logger(), "VrobotMission node destroyed");
+  stop_mission();
 }
 
 bool VrobotMission::init_services() {

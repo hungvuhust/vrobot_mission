@@ -37,7 +37,7 @@ class ServiceCli(Node):
         if future.result() is not None:
             self.get_logger().info(
                 f"Service /vrobot/move/go result: {future.result()}")
-            if (future.result().error_code != 0):
+            if (future.result().success == False):
                 raise Exception("ERROR")
         else:
             self.get_logger().info('exception while calling service: %r' %
