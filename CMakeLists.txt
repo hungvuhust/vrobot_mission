@@ -13,7 +13,6 @@ set(THIS_PACKAGE_DEPENDENCIES
   rclcpp
   rclcpp_components
   std_msgs
-  vrobot_msgs
 )
 
 foreach(DEPENDENCY ${THIS_PACKAGE_DEPENDENCIES})
